@@ -1,4 +1,4 @@
-# database/queries.py - Production Version
+# database/queries.py
 from database.db_connection import get_connection
 from datetime import datetime
 from utils.mac_address import get_mac_address
