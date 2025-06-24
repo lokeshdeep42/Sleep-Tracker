@@ -4,13 +4,13 @@
 
 -- Create or Use Database
 USE master;
-IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = 'sfc_test')
+IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = 'DB_Name')
 BEGIN
-    CREATE DATABASE sfc_test;
+    CREATE DATABASE DB_Name;
 END
 GO
 
-USE sfc_test;
+USE DB_Name;
 GO
 
 -- =====================================================
@@ -409,7 +409,7 @@ SELECT TOP 10 * FROM session_overview;
 PRINT '========================================';
 PRINT 'SETUP COMPLETED SUCCESSFULLY!';
 PRINT '========================================';
-PRINT 'Database: sfc_test';
+PRINT 'Database: DB_Name';
 PRINT 'Tables: accounts, sessions, sleep_events, feedback';
 PRINT 'Functions: GetSessionIdleMinutes, IsCurrentlyIdle, GetSessionSleepMinutes';
 PRINT 'Procedures: GetSessionsWithTracking, GetActiveSessionsWithStatus, CleanupOldEvents';
