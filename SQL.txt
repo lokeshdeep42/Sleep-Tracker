@@ -1,0 +1,431 @@
+-- =====================================================
+-- Employee Time Tracking System - Complete Database Setup
+-- =====================================================
+
+-- Create or Use Database
+USE master;
+IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = 'sfc_test')
+BEGIN
+    CREATE DATABASE sfc_test;
+END
+GO
+
+USE sfc_test;
+GO
+
+-- =====================================================
+-- 1. CREATE TABLES
+-- =====================================================
+
+-- Create Accounts Table
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'accounts')
+BEGIN
+    CREATE TABLE accounts (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        username NVARCHAR(50) NOT NULL UNIQUE,
+        password NVARCHAR(255) NOT NULL,
+        role NVARCHAR(20) NOT NULL CHECK (role IN ('admin', 'employee')),
+        is_active BIT NOT NULL DEFAULT 1,
+        registered_mac_address NVARCHAR(17)
+    );
+    PRINT 'Created accounts table';
+END
+
+-- Create Sessions Table
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'sessions')
+BEGIN
+    CREATE TABLE sessions (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        account_id INT FOREIGN KEY REFERENCES accounts(id),
+        clock_in DATETIME NOT NULL,
+        clock_out DATETIME,
+        total_work_minutes INT,
+        session_date DATE NOT NULL DEFAULT CAST(GETDATE() AS DATE),
+        sleep_minutes INT DEFAULT 0,
+        notes NVARCHAR(255),
+        device_mac_address NVARCHAR(17)
+    );
+    PRINT 'Created sessions table';
+END
+
+-- Create Sleep Events Table (with idle support)
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'sleep_events')
+BEGIN
+    CREATE TABLE sleep_events (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        account_id INT FOREIGN KEY REFERENCES accounts(id),
+        session_id INT FOREIGN KEY REFERENCES sessions(id),
+        event_type NVARCHAR(10) CHECK (event_type IN ('sleep', 'resume', 'idle_start', 'idle_end')),
+        event_time DATETIME NOT NULL,
+        source NVARCHAR(10) DEFAULT 'system'
+    );
+    PRINT 'Created sleep_events table with idle support';
+END
+
+-- Create Feedback Table
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'feedback')
+BEGIN
+    CREATE TABLE feedback (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        account_id INT FOREIGN KEY REFERENCES accounts(id),
+        mood NVARCHAR(20) NOT NULL CHECK (mood IN ('Terrible', 'Poor', 'Good', 'Great', 'Excellent')),
+        comment NVARCHAR(MAX),
+        reasons NVARCHAR(500),
+        is_anonymous BIT NOT NULL DEFAULT 0,
+        submitted_at DATETIME NOT NULL DEFAULT GETDATE()
+    );
+    PRINT 'Created feedback table';
+END
+
+-- =====================================================
+-- 2. CREATE INDEXES
+-- =====================================================
+
+-- MAC Address Indexes
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sessions_mac_address')
+    CREATE INDEX IX_sessions_mac_address ON sessions(device_mac_address);
+
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_accounts_mac_address')
+    CREATE INDEX IX_accounts_mac_address ON accounts(registered_mac_address);
+
+-- Idle Performance Indexes
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sleep_events_idle')
+    CREATE INDEX IX_sleep_events_idle ON sleep_events(session_id, event_type, event_time) 
+    WHERE event_type IN ('idle_start', 'idle_end');
+
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sleep_events_session_time')
+    CREATE INDEX IX_sleep_events_session_time ON sleep_events(session_id, event_time);
+
+PRINT 'Created all indexes';
+
+-- =====================================================
+-- 3. INSERT DEFAULT DATA
+-- =====================================================
+
+-- Insert Default Users (if not exists)
+IF NOT EXISTS (SELECT * FROM accounts WHERE username = 'admin1')
+BEGIN
+    INSERT INTO accounts (username, password, role)
+    VALUES 
+    ('admin1', 'admin123', 'admin'),
+    ('emp1', 'emp123', 'employee');
+    PRINT 'Inserted default users';
+END
+
+-- =====================================================
+-- 4. CREATE FUNCTIONS
+-- =====================================================
+
+-- Function to Calculate Idle Minutes
+IF EXISTS (SELECT * FROM sys.objects WHERE name = 'GetSessionIdleMinutes' AND type = 'FN')
+    DROP FUNCTION GetSessionIdleMinutes;
+GO
+
+CREATE FUNCTION GetSessionIdleMinutes(@session_id INT)
+RETURNS INT
+AS
+BEGIN
+    DECLARE @total_idle INT = 0;
+    DECLARE @idle_start DATETIME;
+    
+    -- Use cursor to process idle events in order
+    DECLARE idle_cursor CURSOR FOR
+    SELECT event_type, event_time 
+    FROM sleep_events 
+    WHERE session_id = @session_id 
+    AND event_type IN ('idle_start', 'idle_end')
+    ORDER BY event_time;
+    
+    DECLARE @event_type NVARCHAR(10);
+    DECLARE @event_time DATETIME;
+    
+    OPEN idle_cursor;
+    FETCH NEXT FROM idle_cursor INTO @event_type, @event_time;
+    
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        IF @event_type = 'idle_start'
+            SET @idle_start = @event_time;
+        ELSE IF @event_type = 'idle_end' AND @idle_start IS NOT NULL
+        BEGIN
+            SET @total_idle = @total_idle + DATEDIFF(MINUTE, @idle_start, @event_time);
+            SET @idle_start = NULL;
+        END
+        
+        FETCH NEXT FROM idle_cursor INTO @event_type, @event_time;
+    END
+    
+    CLOSE idle_cursor;
+    DEALLOCATE idle_cursor;
+    
+    -- If still idle (no end event), add current time
+    IF @idle_start IS NOT NULL
+    BEGIN
+        DECLARE @clock_out DATETIME;
+        SELECT @clock_out = clock_out FROM sessions WHERE id = @session_id;
+        SET @total_idle = @total_idle + DATEDIFF(MINUTE, @idle_start, ISNULL(@clock_out, GETDATE()));
+    END
+    
+    RETURN ISNULL(@total_idle, 0);
+END
+GO
+
+-- Function to Check if Currently Idle
+IF EXISTS (SELECT * FROM sys.objects WHERE name = 'IsCurrentlyIdle' AND type = 'FN')
+    DROP FUNCTION IsCurrentlyIdle;
+GO
+
+CREATE FUNCTION IsCurrentlyIdle(@session_id INT)
+RETURNS BIT
+AS
+BEGIN
+    DECLARE @is_idle BIT = 0;
+    DECLARE @clock_out DATETIME;
+    
+    SELECT @clock_out = clock_out FROM sessions WHERE id = @session_id;
+    
+    -- Only check active sessions
+    IF @clock_out IS NULL
+    BEGIN
+        -- Check if there's an unmatched idle_start
+        IF EXISTS (
+            SELECT 1 FROM sleep_events 
+            WHERE session_id = @session_id 
+            AND event_type = 'idle_start'
+            AND event_time > ISNULL((
+                SELECT MAX(event_time) 
+                FROM sleep_events 
+                WHERE session_id = @session_id 
+                AND event_type = 'idle_end'
+            ), '1900-01-01')
+        )
+        SET @is_idle = 1;
+    END
+    
+    RETURN @is_idle;
+END
+GO
+
+-- Function to Get Sleep Minutes
+IF EXISTS (SELECT * FROM sys.objects WHERE name = 'GetSessionSleepMinutes' AND type = 'FN')
+    DROP FUNCTION GetSessionSleepMinutes;
+GO
+
+CREATE FUNCTION GetSessionSleepMinutes(@session_id INT)
+RETURNS INT
+AS
+BEGIN
+    DECLARE @total_sleep INT = 0;
+    
+    SELECT @total_sleep = SUM(DATEDIFF(MINUTE, se1.event_time, se2.event_time))
+    FROM sleep_events se1
+    JOIN sleep_events se2 ON se1.session_id = se2.session_id
+        AND se1.event_type = 'sleep' 
+        AND se2.event_type = 'resume'
+        AND se2.event_time > se1.event_time
+    WHERE se1.session_id = @session_id
+        AND NOT EXISTS (
+            SELECT 1 FROM sleep_events seX
+            WHERE seX.session_id = se1.session_id 
+              AND seX.event_time > se1.event_time 
+              AND seX.event_time < se2.event_time 
+              AND seX.event_type = 'sleep'
+        );
+    
+    RETURN ISNULL(@total_sleep, 0);
+END
+GO
+
+PRINT 'Created all functions';
+
+-- =====================================================
+-- 5. CREATE STORED PROCEDURES
+-- =====================================================
+
+-- Get All Sessions with Idle and Sleep Data
+IF EXISTS (SELECT * FROM sys.procedures WHERE name = 'GetSessionsWithTracking')
+    DROP PROCEDURE GetSessionsWithTracking;
+GO
+
+CREATE PROCEDURE GetSessionsWithTracking
+AS
+BEGIN
+    SELECT 
+        s.id as session_id,
+        s.account_id,
+        a.username,
+        ISNULL(s.device_mac_address, 'Unknown') as mac_address,
+        s.clock_in,
+        s.clock_out,
+        s.session_date,
+        ISNULL(s.total_work_minutes, 0) as work_minutes,
+        dbo.GetSessionSleepMinutes(s.id) as sleep_minutes,
+        dbo.GetSessionIdleMinutes(s.id) as idle_minutes,
+        dbo.IsCurrentlyIdle(s.id) as is_currently_idle,
+        CASE 
+            WHEN s.clock_out IS NULL THEN 'Active'
+            ELSE 'Completed'
+        END as status,
+        CASE 
+            WHEN s.clock_out IS NULL AND dbo.IsCurrentlyIdle(s.id) = 1 THEN 
+                DATEDIFF(MINUTE, 
+                    (SELECT TOP 1 event_time FROM sleep_events 
+                     WHERE session_id = s.id AND event_type = 'idle_start' 
+                     ORDER BY event_time DESC), 
+                    GETDATE())
+            ELSE 0
+        END as current_idle_duration_minutes
+    FROM sessions s
+    JOIN accounts a ON s.account_id = a.id
+    ORDER BY s.session_date DESC, s.clock_in DESC;
+END
+GO
+
+-- Get Only Active Sessions
+IF EXISTS (SELECT * FROM sys.procedures WHERE name = 'GetActiveSessionsWithStatus')
+    DROP PROCEDURE GetActiveSessionsWithStatus;
+GO
+
+CREATE PROCEDURE GetActiveSessionsWithStatus
+AS
+BEGIN
+    SELECT 
+        s.id as session_id,
+        s.account_id,
+        a.username,
+        ISNULL(s.device_mac_address, 'Unknown') as mac_address,
+        s.clock_in,
+        dbo.GetSessionSleepMinutes(s.id) as sleep_minutes,
+        dbo.GetSessionIdleMinutes(s.id) as idle_minutes,
+        dbo.IsCurrentlyIdle(s.id) as is_currently_idle,
+        CASE 
+            WHEN dbo.IsCurrentlyIdle(s.id) = 1 THEN 
+                DATEDIFF(MINUTE, 
+                    (SELECT TOP 1 event_time FROM sleep_events 
+                     WHERE session_id = s.id AND event_type = 'idle_start' 
+                     ORDER BY event_time DESC), 
+                    GETDATE())
+            ELSE 0
+        END as current_idle_duration_minutes
+    FROM sessions s
+    JOIN accounts a ON s.account_id = a.id
+    WHERE s.clock_out IS NULL
+    ORDER BY s.clock_in DESC;
+END
+GO
+
+-- Cleanup Old Events (Maintenance)
+IF EXISTS (SELECT * FROM sys.procedures WHERE name = 'CleanupOldEvents')
+    DROP PROCEDURE CleanupOldEvents;
+GO
+
+CREATE PROCEDURE CleanupOldEvents(@days_to_keep INT = 90)
+AS
+BEGIN
+    -- Delete old events for completed sessions
+    DELETE se
+    FROM sleep_events se
+    JOIN sessions s ON se.session_id = s.id
+    WHERE s.clock_out IS NOT NULL
+    AND s.session_date < DATEADD(DAY, -@days_to_keep, GETDATE());
+    
+    SELECT @@ROWCOUNT as deleted_events;
+END
+GO
+
+PRINT 'Created all stored procedures';
+
+-- =====================================================
+-- 6. CREATE VIEW FOR EASY ACCESS
+-- =====================================================
+
+IF EXISTS (SELECT * FROM sys.views WHERE name = 'session_overview')
+    DROP VIEW session_overview;
+GO
+
+CREATE VIEW session_overview AS
+SELECT 
+    s.id as session_id,
+    a.username,
+    s.device_mac_address,
+    s.clock_in,
+    s.clock_out,
+    s.session_date,
+    s.total_work_minutes,
+    dbo.GetSessionSleepMinutes(s.id) as sleep_minutes,
+    dbo.GetSessionIdleMinutes(s.id) as idle_minutes,
+    dbo.IsCurrentlyIdle(s.id) as is_currently_idle,
+    CASE 
+        WHEN s.clock_out IS NULL THEN 'Active'
+        ELSE 'Completed'
+    END as status
+FROM sessions s
+JOIN accounts a ON s.account_id = a.id;
+GO
+
+PRINT 'Created session_overview view';
+
+-- =====================================================
+-- 7. VERIFICATION AND TESTING
+-- =====================================================
+
+-- Enable all accounts
+UPDATE accounts SET is_active = 1 WHERE is_active = 0;
+
+-- Show account statuses
+SELECT 
+    id, 
+    username, 
+    role,
+    CASE WHEN is_active = 0 THEN 'Disabled' ELSE 'Active' END AS status
+FROM accounts;
+
+-- Test the functions and procedures
+PRINT 'Testing system...';
+
+-- Show all data
+SELECT 'Accounts' as TableName, COUNT(*) as RecordCount FROM accounts
+UNION ALL
+SELECT 'Sessions', COUNT(*) FROM sessions
+UNION ALL
+SELECT 'Sleep Events', COUNT(*) FROM sleep_events
+UNION ALL
+SELECT 'Feedback', COUNT(*) FROM feedback;
+
+-- Test procedures
+PRINT 'Testing GetActiveSessionsWithStatus...';
+EXEC GetActiveSessionsWithStatus;
+
+PRINT 'Testing GetSessionsWithTracking...';
+EXEC GetSessionsWithTracking;
+
+-- Show the view
+SELECT TOP 10 * FROM session_overview;
+
+-- =====================================================
+-- SETUP COMPLETE
+-- =====================================================
+
+PRINT '========================================';
+PRINT 'SETUP COMPLETED SUCCESSFULLY!';
+PRINT '========================================';
+PRINT 'Database: sfc_test';
+PRINT 'Tables: accounts, sessions, sleep_events, feedback';
+PRINT 'Functions: GetSessionIdleMinutes, IsCurrentlyIdle, GetSessionSleepMinutes';
+PRINT 'Procedures: GetSessionsWithTracking, GetActiveSessionsWithStatus, CleanupOldEvents';
+PRINT 'View: session_overview';
+PRINT '';
+PRINT 'Features included:';
+PRINT '✓ User management (admin/employee roles)';
+PRINT '✓ Session tracking with clock in/out';
+PRINT '✓ Sleep event tracking';
+PRINT '✓ Idle time detection and tracking';
+PRINT '✓ MAC address device tracking';
+PRINT '✓ Feedback system';
+PRINT '✓ Performance indexes';
+PRINT '✓ Maintenance procedures';
+PRINT '';
+PRINT 'Default users created:';
+PRINT '- admin1 / admin123 (admin)';
+PRINT '- emp1 / emp123 (employee)';
+PRINT '========================================';
