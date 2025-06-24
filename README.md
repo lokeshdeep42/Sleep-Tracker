@@ -126,21 +126,21 @@ Use the provided `SystemSleepTrackerInstaller.exe` in the `Output/` folder for a
 ## 📸 Screenshots
 
 ### 🔐 Login Window
-![Login Window](assets/screenshots/login.png)
+![Login Window](assets/login.png)
 
 ### 👨‍💼 Admin Dashboard
-![Admin Dashboard](assets/screenshots/admin.png)
+![Admin Dashboard](assets/admin.png)
 
 ### 👥 Manage Users
-![Admin Dashboard](assets/screenshots/manage_users.png)
+![Admin Dashboard](assets/manage_users.png)
 
 ### 👨‍💻 Employee Dashboard
-![Employee Dashboard](assets/screenshots/employee.png)
+![Employee Dashboard](assets/employee.png)
 
 ### ✉ Feedback Form
-![Employee Dashboard](assets/screenshots/feedback.png)
+![Employee Dashboard](assets/feedback.png)
 
-> Screenshots are stored in: `assets/screenshots/`
+> Screenshots are stored in: `assets/`
 
 ---
 
